@@ -81,6 +81,7 @@ def process(
         source_filename=pdf_path.name,
         model=model,
         host=host,
+        pdf_path=pdf_path,
     )
     logger.info("Stage 2 done: %d documents identified", len(packet.segments))
 

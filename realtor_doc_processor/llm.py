@@ -54,6 +54,13 @@ _PRESETS = {
 MAX_RETRIES = 2          # per provider, on transient errors
 BACKOFF_BASE = 1.5       # seconds
 
+# Vision-capable model per provider (used when images are sent).
+_VISION_MODELS = {
+    "groq": "meta-llama/llama-4-scout-17b-16e-instruct",
+    "openrouter": "qwen/qwen-2.5-vl-72b-instruct:free",
+    "openai": "gpt-4o-mini",
+}
+
 
 def _key_for(provider: str) -> Optional[str]:
     _, key_env, _ = _PRESETS[provider]
@@ -106,14 +113,28 @@ class _Fatal(Exception):
 
 
 def _post(provider: str, model: str, system_prompt: str, user_prompt: str,
-          temperature: float, max_tokens: int, timeout: float) -> str:
+          temperature: float, max_tokens: int, timeout: float,
+          images: Optional[list] = None) -> str:
     endpoint, _, _ = _PRESETS[provider]
     api_key = _key_for(provider)
+
+    if images:
+        # OpenAI-style multimodal: content is a list of text + image_url parts.
+        import base64
+        parts = [{"type": "text", "text": user_prompt}]
+        for mime, data in images:
+            b64 = base64.b64encode(data).decode("ascii")
+            parts.append({"type": "image_url",
+                          "image_url": {"url": f"data:{mime};base64,{b64}"}})
+        user_content = parts
+    else:
+        user_content = user_prompt
+
     payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            {"role": "user", "content": user_content},
         ],
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -182,3 +203,41 @@ def chat_json(
                 break  # don't retry fatal errors on same provider
 
     raise LLMError("All providers failed: " + " | ".join(errors[-4:]))
+
+
+def vision_model(provider: Optional[str] = None) -> str:
+    provider = provider or _primary()
+    return os.getenv("VISION_MODEL") or _VISION_MODELS.get(provider, _VISION_MODELS["groq"])
+
+
+def vision_json(
+    system_prompt: str,
+    user_prompt: str,
+    images: list,                       # list of (mime_type, raw_bytes)
+    model: Optional[str] = None,
+    temperature: float = 0.1,
+    max_tokens: int = 1200,
+    timeout: float = 120.0,
+) -> str:
+    """Same as chat_json but sends page images to a vision-capable model."""
+    providers = _providers_to_try()
+    if not providers:
+        raise LLMError(f"No API key for provider '{_primary()}'.")
+
+    errors: list[str] = []
+    for provider in providers:
+        m = model if (model and provider == _primary()) else vision_model(provider)
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                return _post(provider, m, system_prompt, user_prompt,
+                             temperature, max_tokens, timeout, images=images)
+            except _Transient as e:
+                errors.append(f"{e} (try {attempt + 1})")
+                if attempt < MAX_RETRIES:
+                    time.sleep(BACKOFF_BASE * (attempt + 1))
+                    continue
+            except _Fatal as e:
+                errors.append(str(e))
+                break
+
+    raise LLMError("All vision providers failed: " + " | ".join(errors[-4:]))

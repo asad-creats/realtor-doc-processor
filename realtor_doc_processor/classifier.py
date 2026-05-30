@@ -28,9 +28,11 @@ import re
 from datetime import datetime
 from typing import Optional
 
+from pathlib import Path
+
 from . import llm
 from .models import DocumentSegment, ExtractedFields, TransactionPacket
-from .pdf_extract import PageContent
+from .pdf_extract import PageContent, render_page_images
 from .taxonomy import all_codes, get as get_doc_type, taxonomy_for_prompt
 
 logger = logging.getLogger(__name__)
@@ -93,6 +95,7 @@ def classify_packet(
     api_key: Optional[str] = None,   # ignored (key comes from env)
     model: Optional[str] = None,
     host: Optional[str] = None,      # ignored (legacy)
+    pdf_path: Optional[Path] = None,  # needed for the vision "fill blanks" pass
 ) -> TransactionPacket:
     model = llm.active_model(model or os.environ.get("AI_MODEL"))
     notes: list[str] = []
@@ -110,6 +113,20 @@ def classify_packet(
             notes.append(f"Field extraction failed for document {i} "
                          f"({seg.doc_type_code}, p{seg.start_page}-{seg.end_page}): {e}")
             logger.warning("  doc %d extract failed: %s", i, e)
+
+    # Pass 3 (vision): for documents missing key fields or that were scanned,
+    # re-read the actual page images to fill in the blanks (e.g. dates).
+    if pdf_path and _vision_enabled():
+        for i, seg in enumerate(segments, 1):
+            if not _needs_vision(seg, pages):
+                continue
+            try:
+                vfields = _extract_fields_vision(seg, pdf_path, model)
+                seg.fields = seg.fields.merge(vfields)  # text wins, vision fills gaps
+                logger.info("  doc %d: vision fill applied", i)
+            except Exception as e:
+                notes.append(f"Vision extraction failed for document {i}: {e}")
+                logger.warning("  doc %d vision failed: %s", i, e)
 
     tx_fields = _reconcile(segments)
     _validate_and_flag(segments, notes)
@@ -206,6 +223,44 @@ def _extract_fields(seg: DocumentSegment, pages: list[PageContent], model: str) 
     user = (f"Extract the fields for this {label} document from its text below.\n\n"
             + "\n".join(buf))
     raw = llm.chat_json(system, user, model=model, max_tokens=1200)
+    return _parse_fields(raw)
+
+
+# ─── Pass 3: vision fallback (fill missing fields from the page image) ───────────
+
+def _vision_enabled() -> bool:
+    return os.getenv("ENABLE_VISION", "1").strip().lower() not in ("0", "false", "no")
+
+
+_CONTRACT_DOCS = {"RPA", "CounterOffer", "Addendum"}
+
+
+def _needs_vision(seg: DocumentSegment, pages: list[PageContent]) -> bool:
+    """Trigger vision when a document was scanned, or a contract is missing
+    the fields most often stuck in form boxes (dates, price, address)."""
+    in_range = [p for p in pages if seg.start_page <= p.page_num <= seg.end_page]
+    scanned = any(p.extraction_method == "ocr" or p.char_count < 120 for p in in_range)
+    f = seg.fields
+    if seg.doc_type_code in _CONTRACT_DOCS:
+        missing_core = not (f.contract_date and f.close_of_escrow_date
+                            and f.purchase_price and f.property_address)
+    else:
+        missing_core = seg.doc_type_code in _PRIORITY and not f.property_address
+    return scanned or missing_core
+
+
+def _extract_fields_vision(seg: DocumentSegment, pdf_path: Path, model: str) -> ExtractedFields:
+    dt = get_doc_type(seg.doc_type_code)
+    label = dt.label if dt else seg.doc_type_code
+    desc = dt.description if dt else ""
+    system = EXTRACT_SYSTEM.format(label=label, code=seg.doc_type_code, description=desc)
+    images = render_page_images(pdf_path, seg.start_page, seg.end_page)
+    if not images:
+        return ExtractedFields()
+    user = (f"This is a {label} document ({len(images)} page image(s)). "
+            f"Read the pages and extract the fields. Pay special attention to dates "
+            f"and amounts that appear in form boxes, stamps, or near signatures.")
+    raw = llm.vision_json(system, user, images)
     return _parse_fields(raw)
 
 

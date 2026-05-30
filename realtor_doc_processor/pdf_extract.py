@@ -137,6 +137,36 @@ def extract_pdf(
     return results
 
 
+def render_page_images(
+    pdf_path: Path,
+    start_page: int,
+    end_page: int,
+    dpi: int = 150,
+    max_pages: int = 4,
+    max_width: int = 1100,
+) -> list[tuple[str, bytes]]:
+    """
+    Render a page range to JPEG bytes for a vision model.
+
+    Returns a list of (mime_type, bytes). Caps the number of pages so a long
+    document doesn't blow past the model's image limit. Needs Poppler.
+    """
+    pdf_path = Path(pdf_path)
+    last = min(end_page, start_page + max_pages - 1)
+    images = convert_from_path(str(pdf_path), dpi=dpi, first_page=start_page, last_page=last)
+    out: list[tuple[str, bytes]] = []
+    for img in images:
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        if img.width > max_width:
+            ratio = max_width / img.width
+            img = img.resize((max_width, int(img.height * ratio)), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=80)
+        out.append(("image/jpeg", buf.getvalue()))
+    return out
+
+
 def _resize_for_thumbnail(img: Image.Image) -> Image.Image:
     """Cap the width of the thumbnail so we don't blow our token budget."""
     if img.width <= THUMBNAIL_MAX_WIDTH:
