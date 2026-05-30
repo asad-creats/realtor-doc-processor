@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+.git/
+jobs/
+jobs_cloud_test/
+*.bat
+.env

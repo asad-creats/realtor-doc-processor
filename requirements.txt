@@ -1,0 +1,15 @@
+# Backend API
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+
+# Core pipeline
+httpx>=0.27.0
+pypdf>=4.0.0
+pdfplumber>=0.10.0
+reportlab>=4.0.0
+
+# Optional: only for scanned/image PDFs (OCR). Text PDFs don't need these.
+pdf2image>=1.17.0
+Pillow>=10.0.0
+pytesseract>=0.3.10

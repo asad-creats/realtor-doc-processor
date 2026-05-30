@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Secrets — never commit
+.env
+.env.local
+
+# Generated job output
+jobs/
+jobs_cloud_test/
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
