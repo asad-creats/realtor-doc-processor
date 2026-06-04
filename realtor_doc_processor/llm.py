@@ -1,18 +1,19 @@
 """
 Cloud LLM client (OpenAI-compatible chat completions) with retries + fallback.
 
-Talks to a hosted provider over HTTPS. Default is Groq. If a call is
+Talks to a hosted provider over HTTPS. Default is Google Gemini (a strong,
+multimodal free-tier model that handles both text and vision). If a call is
 rate-limited, errors, or returns junk, it retries with backoff and then falls
 back to any other configured provider (OpenRouter / OpenAI), so a single flaky
 response doesn't fail the whole job.
 
 Configuration (env vars):
-    AI_PROVIDER   groq | openrouter | openai   (default: groq) — tried first
+    AI_PROVIDER   gemini | groq | openrouter | openai (default: gemini) — tried first
     AI_MODEL / AI_TEXT_MODEL        override the text model id (optional)
     VISION_MODEL / AI_VISION_MODEL  override the vision model id (optional)
     AI_ENDPOINT   override the full chat endpoint (advanced)
     AI_API_KEY    generic key (used if the provider-specific one is unset)
-    GROQ_API_KEY / OPENROUTER_API_KEY / OPENAI_API_KEY
+    GEMINI_API_KEY / GROQ_API_KEY / OPENROUTER_API_KEY / OPENAI_API_KEY
 
 Any provider with a key set becomes part of the fallback chain automatically.
 """
@@ -35,6 +36,11 @@ class LLMError(RuntimeError):
 
 # provider -> (endpoint, api-key env var, default model)
 _PRESETS = {
+    "gemini": (
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "GEMINI_API_KEY",
+        "gemini-2.5-flash",
+    ),
     "groq": (
         "https://api.groq.com/openai/v1/chat/completions",
         "GROQ_API_KEY",
@@ -57,6 +63,7 @@ BACKOFF_BASE = 1.5       # seconds
 
 # Vision-capable model per provider (used when images are sent).
 _VISION_MODELS = {
+    "gemini": "gemini-2.5-flash",   # multimodal: same model reads text + images
     "groq": "meta-llama/llama-4-scout-17b-16e-instruct",
     "openrouter": "qwen/qwen-2.5-vl-72b-instruct:free",
     "openai": "gpt-4o-mini",
@@ -69,7 +76,7 @@ def _key_for(provider: str) -> Optional[str]:
 
 
 def _primary() -> str:
-    return os.getenv("AI_PROVIDER", "groq").strip().lower()
+    return os.getenv("AI_PROVIDER", "gemini").strip().lower()
 
 
 def _providers_to_try() -> list[str]:

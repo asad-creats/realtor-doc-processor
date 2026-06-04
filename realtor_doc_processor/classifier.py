@@ -230,10 +230,11 @@ def _extract_fields(seg: DocumentSegment, pages: list[PageContent], model: str) 
 # ─── Dual-model orchestration (text + vision together) ───────────────────────────
 
 def _extraction_mode() -> str:
-    """combine (default): run text + vision together and reconcile.
-    fallback: text first, vision only to fill gaps. text: skip vision."""
-    m = os.getenv("EXTRACTION_MODE", "combine").strip().lower()
-    return m if m in ("combine", "fallback", "text") else "combine"
+    """fallback (default): text model is authoritative, vision only fills gaps
+    on scanned/incomplete docs. combine: run text + vision together and
+    reconcile (vision can override boxed fields). text: skip vision entirely."""
+    m = os.getenv("EXTRACTION_MODE", "fallback").strip().lower()
+    return m if m in ("combine", "fallback", "text") else "fallback"
 
 
 def _extract_document(seg: DocumentSegment, pages: list[PageContent],
