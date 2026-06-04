@@ -42,7 +42,7 @@ _PRESETS = {
     "openrouter": (
         "https://openrouter.ai/api/v1/chat/completions",
         "OPENROUTER_API_KEY",
-        "openai/gpt-oss-120b:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
     ),
     "openai": (
         "https://api.openai.com/v1/chat/completions",
