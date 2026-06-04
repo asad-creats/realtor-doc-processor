@@ -7,7 +7,12 @@ Multi-step pipeline for accuracy on real, messy packets:
                      and types only. Overlapping results are merged.
   Pass 2  EXTRACT  — a separate, focused call PER document to pull its fields
                      from just that document's text. Focused beats one giant
-                     multi-document prompt.
+                     multi-document prompt. In the default "combine" mode each
+                     document is ALSO read by a vision model from its page
+                     images, concurrently, and the two readings are reconciled
+                     (see combine_fields) for higher accuracy on form-box fields
+                     like dates and amounts. EXTRACTION_MODE switches this to
+                     "fallback" (vision only fills gaps) or "text" (no vision).
   Reconcile        — deal-level facts (address, price, parties, dates) are
                      taken preferentially from the main contract (RPA), then
                      filled in from other docs.
@@ -25,6 +30,7 @@ import json
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Optional
 
@@ -105,28 +111,23 @@ def classify_packet(
     segments = _segment(pages, model, notes)
     logger.info("Pass 1 done: %d documents", len(segments))
 
-    logger.info("Pass 2 (extract): %d documents", len(segments))
+    # Pass 2 (extract): per-document field extraction. Depending on
+    # EXTRACTION_MODE this runs the text model alone, the text model with a
+    # vision fallback, or — by default — both models together (reconciled).
+    mode = _extraction_mode()
+    use_vision = bool(pdf_path) and _vision_enabled() and mode != "text"
+    vmodel = llm.vision_model() if use_vision else "off"
+    logger.info("Pass 2 (extract): %d documents | mode=%s | text=%s vision=%s",
+                len(segments), mode, model, vmodel)
+
     for i, seg in enumerate(segments, 1):
         try:
-            seg.fields = _extract_fields(seg, pages, model)
+            seg.fields = _extract_document(
+                seg, pages, pdf_path, model, mode, use_vision, notes, i)
         except Exception as e:
             notes.append(f"Field extraction failed for document {i} "
                          f"({seg.doc_type_code}, p{seg.start_page}-{seg.end_page}): {e}")
             logger.warning("  doc %d extract failed: %s", i, e)
-
-    # Pass 3 (vision): for documents missing key fields or that were scanned,
-    # re-read the actual page images to fill in the blanks (e.g. dates).
-    if pdf_path and _vision_enabled():
-        for i, seg in enumerate(segments, 1):
-            if not _needs_vision(seg, pages):
-                continue
-            try:
-                vfields = _extract_fields_vision(seg, pdf_path, model)
-                seg.fields = seg.fields.merge(vfields)  # text wins, vision fills gaps
-                logger.info("  doc %d: vision fill applied", i)
-            except Exception as e:
-                notes.append(f"Vision extraction failed for document {i}: {e}")
-                logger.warning("  doc %d vision failed: %s", i, e)
 
     tx_fields = _reconcile(segments)
     _validate_and_flag(segments, notes)
@@ -226,7 +227,117 @@ def _extract_fields(seg: DocumentSegment, pages: list[PageContent], model: str) 
     return _parse_fields(raw)
 
 
-# ─── Pass 3: vision fallback (fill missing fields from the page image) ───────────
+# ─── Dual-model orchestration (text + vision together) ───────────────────────────
+
+def _extraction_mode() -> str:
+    """combine (default): run text + vision together and reconcile.
+    fallback: text first, vision only to fill gaps. text: skip vision."""
+    m = os.getenv("EXTRACTION_MODE", "combine").strip().lower()
+    return m if m in ("combine", "fallback", "text") else "combine"
+
+
+def _extract_document(seg: DocumentSegment, pages: list[PageContent],
+                      pdf_path: Optional[Path], model: str, mode: str,
+                      use_vision: bool, notes: list[str], idx: int) -> ExtractedFields:
+    """Extract one document's fields under the active EXTRACTION_MODE."""
+    # Text-only (or vision unavailable): a single text pass.
+    if mode == "text" or not use_vision:
+        return _extract_fields(seg, pages, model)
+
+    # Fallback: text first, then vision only when the doc looks incomplete.
+    if mode == "fallback":
+        fields = _extract_fields(seg, pages, model)
+        seg.fields = fields
+        if not _needs_vision(seg, pages):
+            return fields
+        try:
+            return fields.merge(_extract_fields_vision(seg, pdf_path, model))
+        except Exception as e:                       # noqa: BLE001 - report, don't crash
+            notes.append(f"Vision extraction failed for document {idx}: {e}")
+            logger.warning("  doc %d vision failed: %s", idx, e)
+            return fields
+
+    # Combine: run both models at once, then reconcile field-by-field.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        text_fut = pool.submit(_extract_fields, seg, pages, model)
+        vision_fut = pool.submit(_extract_fields_vision, seg, pdf_path, model)
+        text_fields = _await(text_fut, "text", idx, notes)
+        vision_fields = _await(vision_fut, "vision", idx, notes)
+
+    if text_fields is None and vision_fields is None:
+        return ExtractedFields()
+    if vision_fields is None:
+        return text_fields
+    if text_fields is None:
+        return vision_fields
+
+    merged, conflicts = combine_fields(text_fields, vision_fields)
+    if conflicts:
+        seg.needs_review = True
+        notes.append(f"Document {idx} ({seg.doc_type_code}): text and vision "
+                     f"disagreed on {', '.join(conflicts)} — used the vision "
+                     f"reading for boxed fields, verify.")
+        logger.info("  doc %d: combined (conflicts on %s)", idx, ", ".join(conflicts))
+    else:
+        logger.info("  doc %d: combined (text + vision agree)", idx)
+    return merged
+
+
+def _await(fut, which: str, idx: int, notes: list[str]) -> Optional[ExtractedFields]:
+    try:
+        return fut.result()
+    except Exception as e:                           # noqa: BLE001 - report, don't crash
+        notes.append(f"{which.capitalize()} pass failed for document {idx}: {e}")
+        logger.warning("  doc %d %s pass failed: %s", idx, which, e)
+        return None
+
+
+# Fields that live in form boxes / stamps / near signatures, where reading the
+# page image (vision) is usually more reliable than the OCR'd text layer.
+_VISION_PREFERRED = {
+    "property_address", "purchase_price", "earnest_money",
+    "contract_date", "close_of_escrow_date", "escrow_number", "mls_number",
+}
+
+
+def combine_fields(text: ExtractedFields, vision: ExtractedFields):
+    """Reconcile the text- and vision-extracted fields of one document.
+
+    Returns (merged, conflicts). Name lists are unioned. For scalar fields:
+    if only one model found a value, use it; if both agree, keep it; if they
+    disagree, prefer the vision reading for boxed fields (dates/amounts/address)
+    and the text reading otherwise, and record the field name as a conflict so
+    the segment gets flagged for review.
+    """
+    merged = ExtractedFields()
+    conflicts: list[str] = []
+    for f in merged.__dataclass_fields__:
+        t = getattr(text, f)
+        v = getattr(vision, f)
+        if isinstance(t, list):
+            seen, combined = set(), []
+            for item in t + v:
+                if item and item not in seen:
+                    seen.add(item)
+                    combined.append(item)
+            setattr(merged, f, combined)
+        elif t is None or v is None:
+            setattr(merged, f, t if t is not None else v)
+        elif _values_match(t, v):
+            setattr(merged, f, t)
+        else:
+            conflicts.append(f)
+            setattr(merged, f, v if f in _VISION_PREFERRED else t)
+    return merged, conflicts
+
+
+def _values_match(a, b) -> bool:
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(a - b) < 0.01
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+# ─── Vision pass (read the actual page images) ───────────────────────────────────
 
 def _vision_enabled() -> bool:
     return os.getenv("ENABLE_VISION", "1").strip().lower() not in ("0", "false", "no")

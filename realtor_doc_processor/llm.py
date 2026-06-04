@@ -8,7 +8,8 @@ response doesn't fail the whole job.
 
 Configuration (env vars):
     AI_PROVIDER   groq | openrouter | openai   (default: groq) — tried first
-    AI_MODEL      override the primary model id (optional)
+    AI_MODEL / AI_TEXT_MODEL        override the text model id (optional)
+    VISION_MODEL / AI_VISION_MODEL  override the vision model id (optional)
     AI_ENDPOINT   override the full chat endpoint (advanced)
     AI_API_KEY    generic key (used if the provider-specific one is unset)
     GROQ_API_KEY / OPENROUTER_API_KEY / OPENAI_API_KEY
@@ -89,7 +90,7 @@ def provider_name() -> str:
 def active_model(override: Optional[str] = None) -> str:
     if override:
         return override
-    env_model = os.getenv("AI_MODEL")
+    env_model = os.getenv("AI_MODEL") or os.getenv("AI_TEXT_MODEL")
     if env_model:
         return env_model
     primary = _primary()
@@ -207,7 +208,8 @@ def chat_json(
 
 def vision_model(provider: Optional[str] = None) -> str:
     provider = provider or _primary()
-    return os.getenv("VISION_MODEL") or _VISION_MODELS.get(provider, _VISION_MODELS["groq"])
+    return (os.getenv("VISION_MODEL") or os.getenv("AI_VISION_MODEL")
+            or _VISION_MODELS.get(provider, _VISION_MODELS["groq"]))
 
 
 def vision_json(
