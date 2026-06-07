@@ -19,8 +19,13 @@ type Result = {
   buyers: string[];
   sellers: string[];
   purchasePrice: number | null;
+  earnestMoney: number | null;
   contractDate: string | null;
   closeDate: string | null;
+  escrowNumber: string | null;
+  mlsNumber: string | null;
+  listingAgent: string | null;
+  buyersAgent: string | null;
   documents: DocSeg[];
   docCount: number;
   needsReview: number;
@@ -427,51 +432,93 @@ function TransactionSummaryCard({
   result: Result;
   summaryRef: React.RefObject<HTMLDivElement>;
 }) {
-  const fields: [string, string][] = [
-    ["Buyer(s)", result.buyers?.length ? result.buyers.join(", ") : "—"],
-    ["Seller(s)", result.sellers?.length ? result.sellers.join(", ") : "—"],
-    ["Purchase price", money(result.purchasePrice)],
-    ["Documents", String(result.docCount)],
-    ["Contract date", fmtDate(result.contractDate)],
-    ["Close of escrow", fmtDate(result.closeDate)],
-  ];
+  // Only surface fields that actually have data — no lonely "—" placeholders.
+  const fields: [string, string][] = [];
+  const add = (label: string, value: string | null | undefined) => {
+    if (value && value !== "—") fields.push([label, value]);
+  };
+  add("Buyer(s)", result.buyers?.length ? result.buyers.join(", ") : null);
+  add("Seller(s)", result.sellers?.length ? result.sellers.join(", ") : null);
+  add("Earnest money", result.earnestMoney != null ? money(result.earnestMoney) : null);
+  add("Contract date", result.contractDate ? fmtDate(result.contractDate) : null);
+  add("Close of escrow", result.closeDate ? fmtDate(result.closeDate) : null);
+  add("Escrow #", result.escrowNumber);
+  add("MLS #", result.mlsNumber);
+  add("Listing agent", result.listingAgent);
+  add("Buyer's agent", result.buyersAgent);
+
+  const reviewClean = result.needsReview === 0;
 
   return (
     <div ref={summaryRef} className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
-      {/* Header band */}
-      <div className="bg-indigo-600 px-6 py-5 text-white">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo-200">
-          Transaction Summary
-        </p>
-        <h3 className="mt-1.5 text-xl font-bold leading-snug">
+      {/* Header band — address + hero price */}
+      <div className="bg-indigo-600 px-6 pb-6 pt-5 text-white">
+        <div className="flex items-center justify-between">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo-200">
+            Transaction Summary
+          </p>
+          <span
+            className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide ${
+              reviewClean ? "bg-white/15 text-white" : "bg-amber-300 text-amber-900"
+            }`}
+          >
+            {reviewClean ? "Verified" : `${result.needsReview} to review`}
+          </span>
+        </div>
+
+        <h3 className="mt-2 text-xl font-bold leading-snug">
           {result.address || "Address not detected"}
         </h3>
+
+        <div className="mt-4 flex items-end justify-between border-t border-white/15 pt-4">
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-indigo-200">
+              Purchase price
+            </p>
+            <p className="mt-0.5 text-3xl font-extrabold leading-none tracking-tight">
+              {money(result.purchasePrice)}
+            </p>
+          </div>
+          <div className="text-right">
+            <p className="text-2xl font-extrabold leading-none">{result.docCount}</p>
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-indigo-200">
+              Document{result.docCount === 1 ? "" : "s"}
+            </p>
+          </div>
+        </div>
       </div>
 
       {/* Fields */}
       <div className="px-6 py-5">
-        <div className="grid grid-cols-2 gap-x-6 gap-y-4">
-          {fields.map(([k, v]) => (
-            <div key={k}>
-              <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{k}</p>
-              <p className="mt-1 text-sm font-semibold text-slate-800">{v}</p>
-            </div>
-          ))}
-        </div>
+        {fields.length > 0 && (
+          <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+            {fields.map(([k, v]) => (
+              <div key={k}>
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{k}</p>
+                <p className="mt-1 text-sm font-semibold text-slate-800">{v}</p>
+              </div>
+            ))}
+          </div>
+        )}
 
-        <div className="my-5 h-px bg-slate-100" />
+        {fields.length > 0 && <div className="my-5 h-px bg-slate-100" />}
 
         <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
           Documents in packet
         </p>
-        <ul className="mt-3 space-y-2">
+        <ul className="mt-3 space-y-2.5">
           {result.documents.map((d, i) => (
-            <li key={i} className="flex items-baseline justify-between gap-3 text-sm">
-              <span className="text-slate-700">{DOC_LABELS[d.code] || d.code}</span>
-              <span className="text-xs text-slate-400">
+            <li key={i} className="flex items-center gap-3">
+              <span className="flex h-7 w-7 flex-none items-center justify-center rounded-lg bg-indigo-50 text-[11px] font-bold text-indigo-600">
+                {i + 1}
+              </span>
+              <span className="flex-1 text-sm font-medium text-slate-800">
+                {DOC_LABELS[d.code] || d.code}
+              </span>
+              <span className="flex-none text-xs font-medium text-slate-400">
                 {d.startPage === d.endPage
                   ? `p. ${d.startPage}`
-                  : `p. ${d.startPage}–${d.endPage}`}
+                  : `pp. ${d.startPage}–${d.endPage}`}
               </span>
             </li>
           ))}
@@ -484,10 +531,15 @@ function TransactionSummaryCard({
         )}
       </div>
 
-      {/* Footer */}
-      <div className="flex items-center justify-between border-t border-slate-100 px-6 py-3 text-[11px] text-slate-400">
-        <span>Generated by Packet Organizer</span>
-        <span>
+      {/* Footer — logo mark + date */}
+      <div className="flex items-center justify-between border-t border-slate-100 px-6 py-3.5">
+        <span className="flex items-center gap-2 text-[11px] font-semibold text-slate-500">
+          <span className="flex h-5 w-5 items-center justify-center rounded-md bg-indigo-600 text-white">
+            <DocIcon className="h-3 w-3" />
+          </span>
+          Packet Organizer
+        </span>
+        <span className="text-[11px] text-slate-400">
           {new Date().toLocaleDateString(undefined, {
             year: "numeric",
             month: "short",

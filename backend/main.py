@@ -130,8 +130,13 @@ def process_endpoint(file: UploadFile = File(...)):
         "buyers": tx.buyer_names,
         "sellers": tx.seller_names,
         "purchasePrice": tx.purchase_price,
+        "earnestMoney": tx.earnest_money,
         "contractDate": tx.contract_date,
         "closeDate": tx.close_of_escrow_date,
+        "escrowNumber": tx.escrow_number,
+        "mlsNumber": tx.mls_number,
+        "listingAgent": tx.listing_agent,
+        "buyersAgent": tx.buyers_agent,
         "documents": [
             {
                 "code": s.doc_type_code,
