@@ -67,6 +67,22 @@ const fmtDate = (s: string | null) => {
     : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 };
 
+/* ── Lazy CDN loaders for the download libs (no bundle/install needed) ── */
+function loadScript(src: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) return resolve();
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error(`Failed to load ${src}`));
+    document.head.appendChild(s);
+  });
+}
+async function ensureDownloadLibs() {
+  await loadScript("https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js");
+  await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
+}
+
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -74,7 +90,9 @@ export default function Home() {
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState<string>("");
   const [engine, setEngine] = useState<{ ok: boolean; model?: string; provider?: string } | null>(null);
+  const [downloading, setDownloading] = useState<"pdf" | "png" | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const summaryRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!API_BASE) return;
@@ -132,6 +150,63 @@ export default function Home() {
     if (inputRef.current) inputRef.current.value = "";
   };
 
+  /* ── Download the summary card as PNG / PDF (client-side, WYSIWYG) ── */
+  const renderCanvas = async () => {
+    await ensureDownloadLibs();
+    const html2canvas = (window as any).html2canvas;
+    return (await html2canvas(summaryRef.current, {
+      backgroundColor: "#ffffff",
+      scale: 2,
+      useCORS: true,
+      logging: false,
+    })) as HTMLCanvasElement;
+  };
+
+  const downloadPng = async () => {
+    if (!summaryRef.current) return;
+    setDownloading("png");
+    try {
+      const canvas = await renderCanvas();
+      const link = document.createElement("a");
+      link.download = `transaction-summary-${result?.jobId || "report"}.png`;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setDownloading(null);
+    }
+  };
+
+  const downloadPdf = async () => {
+    if (!summaryRef.current) return;
+    setDownloading("pdf");
+    try {
+      const canvas = await renderCanvas();
+      const imgData = canvas.toDataURL("image/png");
+      const { jsPDF } = (window as any).jspdf;
+      const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+      const pageW = pdf.internal.pageSize.getWidth();
+      const pageH = pdf.internal.pageSize.getHeight();
+      const margin = 24;
+      let drawW = pageW - margin * 2;
+      let drawH = (canvas.height / canvas.width) * drawW;
+      if (drawH > pageH - margin * 2) {
+        drawH = pageH - margin * 2;
+        drawW = (canvas.width / canvas.height) * drawH;
+      }
+      const x = (pageW - drawW) / 2;
+      pdf.addImage(imgData, "PNG", x, margin, drawW, drawH);
+      pdf.save(`transaction-summary-${result?.jobId || "report"}.pdf`);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setDownloading(null);
+    }
+  };
+
+  const isDone = status === "done" && !!result;
+
   return (
     <main className="min-h-screen bg-gradient-to-b from-white via-slate-50 to-slate-100">
       {/* Nav */}
@@ -154,75 +229,78 @@ export default function Home() {
         )}
       </header>
 
-      <section className="mx-auto max-w-3xl px-6 pb-24 pt-8">
-        {/* Hero */}
-        <div className="text-center">
-          <h1 className="text-4xl font-bold tracking-tight text-slate-900 sm:text-5xl">
-            Turn one messy packet into a clean deal file
-          </h1>
-          <p className="mx-auto mt-4 max-w-xl text-base leading-relaxed text-slate-500">
-            Drop a combined transaction PDF. We identify each document, split it out, rename it,
-            and hand back an organized folder with a transaction summary.
-          </p>
-        </div>
+      <section className={`mx-auto px-6 pb-24 pt-8 ${isDone ? "max-w-6xl" : "max-w-3xl"}`}>
+        {/* Hero — only before a result */}
+        {!isDone && (
+          <div className="text-center">
+            <h1 className="text-4xl font-bold tracking-tight text-slate-900 sm:text-5xl">
+              Turn one messy packet into a clean deal file
+            </h1>
+            <p className="mx-auto mt-4 max-w-xl text-base leading-relaxed text-slate-500">
+              Drop a combined transaction PDF. We identify each document, split it out, rename it,
+              and hand back an organized folder with a transaction summary.
+            </p>
+          </div>
+        )}
 
-        {/* Card */}
-        <div className="mt-12 rounded-3xl border border-slate-200 bg-white p-6 shadow-xl shadow-slate-200/50 sm:p-8">
-          {status !== "done" && (
-            <>
-              <label
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setDragging(true);
-                }}
-                onDragLeave={() => setDragging(false)}
-                onDrop={onDrop}
-                className={`flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-14 text-center transition ${
-                  dragging
-                    ? "border-indigo-400 bg-indigo-50/60"
-                    : "border-slate-200 bg-slate-50/60 hover:border-slate-300 hover:bg-slate-50"
-                }`}
-              >
-                <UploadIcon className="mb-3 h-9 w-9 text-indigo-500" />
-                <span className="text-[15px] font-semibold text-slate-800">
-                  {file ? file.name : "Drag a PDF here, or click to browse"}
-                </span>
-                <span className="mt-1 text-xs text-slate-400">
-                  {file ? `${(file.size / 1024 / 1024).toFixed(1)} MB` : "Combined packets up to 100 MB"}
-                </span>
-                <input
-                  ref={inputRef}
-                  type="file"
-                  accept="application/pdf"
-                  className="hidden"
-                  onChange={(e) => pick(e.target.files?.[0] || null)}
-                />
-              </label>
+        {/* Upload card — before a result */}
+        {!isDone && (
+          <div className="mt-12 rounded-3xl border border-slate-200 bg-white p-6 shadow-xl shadow-slate-200/50 sm:p-8">
+            <label
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDragging(true);
+              }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={onDrop}
+              className={`flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-14 text-center transition ${
+                dragging
+                  ? "border-indigo-400 bg-indigo-50/60"
+                  : "border-slate-200 bg-slate-50/60 hover:border-slate-300 hover:bg-slate-50"
+              }`}
+            >
+              <UploadIcon className="mb-3 h-9 w-9 text-indigo-500" />
+              <span className="text-[15px] font-semibold text-slate-800">
+                {file ? file.name : "Drag a PDF here, or click to browse"}
+              </span>
+              <span className="mt-1 text-xs text-slate-400">
+                {file ? `${(file.size / 1024 / 1024).toFixed(1)} MB` : "Combined packets up to 100 MB"}
+              </span>
+              <input
+                ref={inputRef}
+                type="file"
+                accept="application/pdf"
+                className="hidden"
+                onChange={(e) => pick(e.target.files?.[0] || null)}
+              />
+            </label>
 
-              <button
-                onClick={submit}
-                disabled={!file || status === "working"}
-                className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3.5 text-[15px] font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-indigo-300"
-              >
-                {status === "working" ? (
-                  <>
-                    <Spinner className="h-4 w-4 animate-spin" />
-                    Processing… this can take a moment
-                  </>
-                ) : (
-                  "Process packet"
-                )}
-              </button>
-
-              {status === "error" && (
-                <p className="mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>
+            <button
+              onClick={submit}
+              disabled={!file || status === "working"}
+              className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3.5 text-[15px] font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-indigo-300"
+            >
+              {status === "working" ? (
+                <>
+                  <Spinner className="h-4 w-4 animate-spin" />
+                  Processing… this can take a moment
+                </>
+              ) : (
+                "Process packet"
               )}
-            </>
-          )}
+            </button>
 
-          {/* Result */}
-          {status === "done" && result && (
-            <div className="animate-fade-up">
+            {status === "error" && (
+              <p className="mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>
+            )}
+          </div>
+        )}
+
+        {/* Result — two columns: summary (left) + designed template (right) */}
+        {isDone && result && (
+          <div className="grid animate-fade-up gap-6 lg:grid-cols-2">
+            {/* LEFT: existing summary + document list */}
+            <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-xl shadow-slate-200/50 sm:p-8">
               <div className="flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
                   <CheckIcon className="h-5 w-5" />
@@ -294,11 +372,38 @@ export default function Home() {
                 </button>
               </div>
             </div>
-          )}
-        </div>
+
+            {/* RIGHT: auto-filled designed template + its own downloads */}
+            <div className="lg:sticky lg:top-8 lg:self-start">
+              <TransactionSummaryCard result={result} summaryRef={summaryRef} />
+
+              <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+                <button
+                  onClick={downloadPdf}
+                  disabled={downloading !== null}
+                  className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-[15px] font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <DownloadIcon className="h-4 w-4" />
+                  {downloading === "pdf" ? "Rendering…" : "Download PDF"}
+                </button>
+                <button
+                  onClick={downloadPng}
+                  disabled={downloading !== null}
+                  className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-3 text-[15px] font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <DownloadIcon className="h-4 w-4" />
+                  {downloading === "png" ? "Rendering…" : "Download PNG"}
+                </button>
+              </div>
+              <p className="mt-2 text-center text-xs text-slate-400">
+                One-page transaction snapshot · shareable image or print-ready PDF
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Steps */}
-        {status !== "done" && (
+        {!isDone && (
           <div className="mt-10 grid grid-cols-1 gap-4 sm:grid-cols-3">
             <Step n="1" title="Upload" text="One combined PDF, however messy." />
             <Step n="2" title="AI sorts it" text="Each document is identified and split apart." />
@@ -311,6 +416,86 @@ export default function Home() {
         Realtor Document Processor
       </footer>
     </main>
+  );
+}
+
+/* ── The auto-filled, designed one-pager shown on the right + exported ── */
+function TransactionSummaryCard({
+  result,
+  summaryRef,
+}: {
+  result: Result;
+  summaryRef: React.RefObject<HTMLDivElement>;
+}) {
+  const fields: [string, string][] = [
+    ["Buyer(s)", result.buyers?.length ? result.buyers.join(", ") : "—"],
+    ["Seller(s)", result.sellers?.length ? result.sellers.join(", ") : "—"],
+    ["Purchase price", money(result.purchasePrice)],
+    ["Documents", String(result.docCount)],
+    ["Contract date", fmtDate(result.contractDate)],
+    ["Close of escrow", fmtDate(result.closeDate)],
+  ];
+
+  return (
+    <div ref={summaryRef} className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+      {/* Header band */}
+      <div className="bg-indigo-600 px-6 py-5 text-white">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo-200">
+          Transaction Summary
+        </p>
+        <h3 className="mt-1.5 text-xl font-bold leading-snug">
+          {result.address || "Address not detected"}
+        </h3>
+      </div>
+
+      {/* Fields */}
+      <div className="px-6 py-5">
+        <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+          {fields.map(([k, v]) => (
+            <div key={k}>
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{k}</p>
+              <p className="mt-1 text-sm font-semibold text-slate-800">{v}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="my-5 h-px bg-slate-100" />
+
+        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+          Documents in packet
+        </p>
+        <ul className="mt-3 space-y-2">
+          {result.documents.map((d, i) => (
+            <li key={i} className="flex items-baseline justify-between gap-3 text-sm">
+              <span className="text-slate-700">{DOC_LABELS[d.code] || d.code}</span>
+              <span className="text-xs text-slate-400">
+                {d.startPage === d.endPage
+                  ? `p. ${d.startPage}`
+                  : `p. ${d.startPage}–${d.endPage}`}
+              </span>
+            </li>
+          ))}
+        </ul>
+
+        {result.needsReview > 0 && (
+          <p className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">
+            {result.needsReview} document{result.needsReview === 1 ? "" : "s"} flagged for review.
+          </p>
+        )}
+      </div>
+
+      {/* Footer */}
+      <div className="flex items-center justify-between border-t border-slate-100 px-6 py-3 text-[11px] text-slate-400">
+        <span>Generated by Packet Organizer</span>
+        <span>
+          {new Date().toLocaleDateString(undefined, {
+            year: "numeric",
+            month: "short",
+            day: "numeric",
+          })}
+        </span>
+      </div>
+    </div>
   );
 }
 
